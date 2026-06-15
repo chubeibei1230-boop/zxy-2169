@@ -59,6 +59,7 @@ def calculate_inventory_ledger(
         merged["initial_stock"]
         - merged["总发放量"]
         + merged["总回收量"]
+        - merged["总丢失量"]
     )
 
     merged["库存状态"] = merged.apply(determine_stock_status, axis=1)

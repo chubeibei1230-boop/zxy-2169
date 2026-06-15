@@ -104,6 +104,7 @@ def render_upload_section():
             raw_df = read_csv_from_upload(uploaded_file)
             if raw_df is not None:
                 st.session_state.raw_df = raw_df
+                st.session_state.inventory_params = None
                 st.success(f"✅ 成功读取 {len(raw_df)} 条记录")
 
                 with st.expander("查看原始数据预览"):
@@ -179,8 +180,7 @@ def render_column_mapping(raw_df):
         validation_results = validate_all(normalized_df, raw_df, mapping)
         st.session_state.validation_results = validation_results
 
-        if st.session_state.inventory_params is None:
-            st.session_state.inventory_params = init_inventory_params(normalized_df)
+        st.session_state.inventory_params = init_inventory_params(normalized_df)
 
         st.success("✅ 数据处理完成")
 
@@ -518,7 +518,7 @@ def render_download_section(original_df, filtered_df, filters, stats, trend, ran
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        st.sidebar.info("报告包含：封面、核心指标、发放趋势、回收差异、小组负载、待跟进记录、补充建议、库存台账、预警清单、筛选后明细")
+        st.sidebar.info("报告包含：封面、核心指标、发放趋势、回收差异、小组负载、待跟进记录、补充建议、库存台账(跟随筛选)、预警清单(跟随筛选)、筛选后明细")
     except Exception as e:
         st.sidebar.error(f"生成报告失败: {str(e)}")
 
@@ -588,6 +588,7 @@ def render_inventory_params_config(normalized_df):
             saved_df["safety_stock"] = saved_df["safety_stock"].fillna(0).astype(int)
             st.session_state.inventory_params = saved_df
             st.success("✅ 库存参数已保存")
+            st.rerun()
 
     with st.expander("📊 当前库存参数概览", expanded=True):
         overview_df = params_df.copy()
@@ -823,6 +824,10 @@ def main():
         low_stock_alerts = get_low_stock_alerts(inventory_ledger)
         abnormal_inventory = get_abnormal_inventory(inventory_ledger)
 
+        filtered_inventory_ledger = calculate_inventory_ledger(filtered_df, st.session_state.inventory_params)
+        filtered_low_stock_alerts = get_low_stock_alerts(filtered_inventory_ledger)
+        filtered_abnormal_inventory = get_abnormal_inventory(filtered_inventory_ledger)
+
         tab_main1, tab_main2 = st.tabs(["📊 物料流转分析", "📦 物料库存台账与预警"])
 
         with tab_main1:
@@ -857,7 +862,7 @@ def main():
 
         render_download_section(
             df, filtered_df, filters, stats, trend, ranking, workload, pending, suggestions,
-            inventory_ledger, low_stock_alerts, abnormal_inventory
+            filtered_inventory_ledger, filtered_low_stock_alerts, filtered_abnormal_inventory
         )
 
 
