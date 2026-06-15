@@ -39,6 +39,15 @@ from report_generator import (
     generate_summary_report,
     get_report_filename,
 )
+from inventory_engine import (
+    init_inventory_params,
+    calculate_inventory_ledger,
+    get_inventory_summary,
+    format_alert_label,
+    get_low_stock_alerts,
+    get_abnormal_inventory,
+    filter_ledger,
+)
 
 
 st.set_page_config(
@@ -87,6 +96,8 @@ def render_upload_section():
         st.session_state.column_mapping = None
     if "validation_results" not in st.session_state:
         st.session_state.validation_results = None
+    if "inventory_params" not in st.session_state:
+        st.session_state.inventory_params = None
 
     if uploaded_file is not None:
         try:
@@ -167,6 +178,9 @@ def render_column_mapping(raw_df):
 
         validation_results = validate_all(normalized_df, raw_df, mapping)
         st.session_state.validation_results = validation_results
+
+        if st.session_state.inventory_params is None:
+            st.session_state.inventory_params = init_inventory_params(normalized_df)
 
         st.success("✅ 数据处理完成")
 
@@ -467,7 +481,8 @@ def render_suggestions(suggestions_df):
         st.dataframe(display_df[display_columns], use_container_width=True)
 
 
-def render_download_section(original_df, filtered_df, filters, stats, trend, ranking, workload, pending, suggestions):
+def render_download_section(original_df, filtered_df, filters, stats, trend, ranking, workload, pending, suggestions,
+                             inventory_ledger, low_stock_alerts, abnormal_inventory):
     st.sidebar.markdown("---")
     st.sidebar.header("📥 报告下载")
 
@@ -491,6 +506,9 @@ def render_download_section(original_df, filtered_df, filters, stats, trend, ran
             pending,
             suggestions,
             filters_display,
+            inventory_ledger,
+            low_stock_alerts,
+            abnormal_inventory,
         )
 
         st.sidebar.download_button(
@@ -500,7 +518,7 @@ def render_download_section(original_df, filtered_df, filters, stats, trend, ran
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        st.sidebar.info("报告包含：封面、核心指标、发放趋势、回收差异、小组负载、待跟进记录、补充建议、筛选后明细")
+        st.sidebar.info("报告包含：封面、核心指标、发放趋势、回收差异、小组负载、待跟进记录、补充建议、库存台账、预警清单、筛选后明细")
     except Exception as e:
         st.sidebar.error(f"生成报告失败: {str(e)}")
 
@@ -529,6 +547,243 @@ def render_data_preview(filtered_df):
 
     st.dataframe(display_df, use_container_width=True)
     st.caption(f"共 {len(filtered_df)} 条记录")
+
+
+def render_inventory_params_config(normalized_df):
+    st.header("⚙️ 库存参数配置")
+    st.markdown("请为每种物料设置**期初库存**和**最低安全库存**，系统将据此计算当前可用库存和预警状态。")
+
+    if st.session_state.inventory_params is None or st.session_state.inventory_params.empty:
+        st.session_state.inventory_params = init_inventory_params(normalized_df)
+
+    params_df = st.session_state.inventory_params.copy()
+
+    if params_df.empty:
+        st.info("暂无物料数据，请先上传物料流转记录")
+        return
+
+    display_cols = {
+        "item_name": "物料名称",
+        "initial_stock": "期初库存",
+        "safety_stock": "最低安全库存",
+    }
+
+    with st.expander("📝 编辑库存参数（点击展开）", expanded=False):
+        edited_df = st.data_editor(
+            params_df.rename(columns=display_cols),
+            use_container_width=True,
+            num_rows="fixed",
+            hide_index=True,
+            column_config={
+                "物料名称": st.column_config.TextColumn(disabled=True),
+                "期初库存": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
+                "最低安全库存": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
+            },
+        )
+
+        if st.button("💾 保存库存参数", type="primary"):
+            reverse_cols = {v: k for k, v in display_cols.items()}
+            saved_df = edited_df.rename(columns=reverse_cols)
+            saved_df["initial_stock"] = saved_df["initial_stock"].fillna(0).astype(int)
+            saved_df["safety_stock"] = saved_df["safety_stock"].fillna(0).astype(int)
+            st.session_state.inventory_params = saved_df
+            st.success("✅ 库存参数已保存")
+
+    with st.expander("📊 当前库存参数概览", expanded=True):
+        overview_df = params_df.copy()
+        overview_df["期初库存"] = overview_df["initial_stock"]
+        overview_df["最低安全库存"] = overview_df["safety_stock"]
+        overview_df["物料名称"] = overview_df["item_name"]
+        st.dataframe(
+            overview_df[["物料名称", "期初库存", "最低安全库存"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(f"共 {len(params_df)} 种物料")
+
+
+def render_inventory_summary(inv_summary):
+    st.subheader("📊 库存总览")
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.metric("物料种类", f"{inv_summary['total_items']}")
+    with col2:
+        st.metric("当前总库存", f"{inv_summary['total_current_stock']:,}")
+    with col3:
+        st.metric("库存充足", f"{inv_summary['stock_sufficient']}", help="库存≥1.5倍安全库存")
+    with col4:
+        st.metric("库存不足", f"{inv_summary['stock_insufficient'] + inv_summary['stock_zero'] + inv_summary['stock_negative']}", help="库存<安全库存")
+    with col5:
+        st.metric("异常库存", f"{inv_summary['abnormal_count']}", help="负库存/丢失率过高等")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("🔴 紧急预警", f"{inv_summary['alert_high']}")
+    with col2:
+        st.metric("🟡 注意预警", f"{inv_summary['alert_medium']}")
+    with col3:
+        st.metric("🟢 正常", f"{inv_summary['alert_low']}")
+    with col4:
+        st.metric("建议补充总量", f"{inv_summary['total_suggested_qty']:,}")
+
+    if inv_summary["stock_negative"] > 0:
+        st.error(f"⚠️ 警告：存在 {inv_summary['stock_negative']} 种物料出现负库存，请立即核查！")
+    if inv_summary["stock_zero"] > 0:
+        st.warning(f"⚠️ 提醒：有 {inv_summary['stock_zero']} 种物料库存为零！")
+
+
+def render_low_stock_alerts(low_stock_df):
+    st.subheader("🚨 低库存提醒")
+
+    if low_stock_df.empty:
+        st.success("✅ 所有物料库存状态正常")
+        return
+
+    high_priority = low_stock_df[low_stock_df["预警级别"] >= 7]
+    medium_priority = low_stock_df[(low_stock_df["预警级别"] >= 4) & (low_stock_df["预警级别"] < 7)]
+
+    if not high_priority.empty:
+        st.markdown("#### 🔴 紧急补充")
+        for _, row in high_priority.iterrows():
+            st.markdown(f"""
+                <div class='high-priority' style='padding: 1rem; border-radius: 0.5rem; margin-bottom: 0.5rem;'>
+                    <strong>{row['item_name']}</strong> — 当前库存: <strong>{row['当前可用库存']}</strong>，安全库存: {row['safety_stock']}，建议补充 <strong>{row['建议补充数量']}</strong> 件
+                    <br><small>状态：{row['库存状态']} | 异常：{row['异常标记']}</small>
+                </div>
+            """, unsafe_allow_html=True)
+
+    if not medium_priority.empty:
+        st.markdown("#### 🟡 即将补充")
+        for _, row in medium_priority.iterrows():
+            st.markdown(f"""
+                <div class='medium-priority' style='padding: 1rem; border-radius: 0.5rem; margin-bottom: 0.5rem;'>
+                    <strong>{row['item_name']}</strong> — 当前库存: <strong>{row['当前可用库存']}</strong>，安全库存: {row['safety_stock']}，建议补充 <strong>{row['建议补充数量']}</strong> 件
+                    <br><small>状态：{row['库存状态']} | 异常：{row['异常标记']}</small>
+                </div>
+            """, unsafe_allow_html=True)
+
+
+def render_abnormal_inventory(abnormal_df):
+    st.subheader("⚠️ 异常库存提示")
+
+    if abnormal_df.empty:
+        st.success("✅ 未发现异常库存")
+        return
+
+    display_df = abnormal_df.copy()
+    display_df["预警级别"] = display_df["预警级别"].apply(format_alert_label)
+    display_df["丢失率"] = display_df["丢失率"].apply(lambda x: f"{x*100:.1f}%")
+    if "最近活动日期" in display_df.columns:
+        display_df["最近活动日期"] = display_df["最近活动日期"].dt.strftime("%Y-%m-%d")
+
+    column_mapping = {
+        "item_name": "物料名称",
+        "initial_stock": "期初库存",
+        "safety_stock": "安全库存",
+        "当前可用库存": "当前库存",
+        "库存状态": "库存状态",
+        "预警级别": "预警级别",
+        "异常标记": "异常说明",
+        "总发放量": "累计发放",
+        "总回收量": "累计回收",
+        "总丢失量": "累计丢失",
+        "丢失率": "丢失率",
+        "建议补充数量": "建议补充",
+        "最近活动日期": "最近活动",
+    }
+    display_df = display_df.rename(columns=column_mapping)
+
+    display_columns = [
+        "物料名称", "当前库存", "安全库存", "库存状态",
+        "预警级别", "异常说明", "累计发放", "累计回收",
+        "累计丢失", "丢失率", "建议补充"
+    ]
+
+    st.dataframe(display_df[display_columns], use_container_width=True, hide_index=True)
+    st.caption(f"共发现 {len(abnormal_df)} 种存在异常的物料")
+
+
+def render_inventory_ledger(ledger_df):
+    st.subheader("📒 库存台账明细")
+
+    if ledger_df.empty:
+        st.info("暂无库存台账数据")
+        return
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        stock_status_filter = st.selectbox(
+            "库存状态",
+            options=["全部", "库存充足", "库存偏低", "库存不足", "库存为零", "负库存"],
+            index=0,
+        )
+    with col2:
+        alert_filter = st.selectbox(
+            "预警级别",
+            options=["全部", "紧急(≥7)", "注意(4-6)", "正常(<4)"],
+            index=0,
+        )
+    with col3:
+        abnormal_filter = st.selectbox(
+            "异常标记",
+            options=["全部", "仅异常", "仅正常"],
+            index=0,
+        )
+    with col4:
+        item_filter = st.multiselect(
+            "物料名称",
+            options=sorted(ledger_df["item_name"].unique().tolist()),
+            default=[],
+            placeholder="选择物料（不选则全部）",
+        )
+
+    has_abnormal = None
+    if abnormal_filter == "仅异常":
+        has_abnormal = True
+    elif abnormal_filter == "仅正常":
+        has_abnormal = False
+
+    filtered_ledger = filter_ledger(
+        ledger_df,
+        stock_status=stock_status_filter if stock_status_filter != "全部" else None,
+        alert_level=alert_filter if alert_filter != "全部" else None,
+        has_abnormal=has_abnormal,
+        item_names=item_filter if item_filter else None,
+    )
+
+    if filtered_ledger.empty:
+        st.warning("筛选条件下无数据")
+        return
+
+    display_df = filtered_ledger.copy()
+    display_df["预警级别"] = display_df["预警级别"].apply(format_alert_label)
+    display_df["丢失率"] = display_df["丢失率"].apply(lambda x: f"{x*100:.1f}%")
+    if "最近活动日期" in display_df.columns:
+        display_df["最近活动日期"] = display_df["最近活动日期"].dt.strftime("%Y-%m-%d")
+
+    column_mapping = {
+        "item_name": "物料名称",
+        "initial_stock": "期初库存",
+        "safety_stock": "安全库存",
+        "总发放量": "累计发放",
+        "总回收量": "累计回收",
+        "总丢失量": "累计丢失",
+        "净消耗量": "净消耗",
+        "丢失率": "丢失率",
+        "当前可用库存": "当前库存",
+        "库存差额": "库存差额",
+        "库存状态": "库存状态",
+        "预警级别": "预警级别",
+        "建议补充数量": "建议补充",
+        "异常标记": "异常标记",
+        "发放次数": "发放次数",
+        "最近活动日期": "最近活动",
+    }
+    display_df = display_df.rename(columns=column_mapping)
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.caption(f"共 {len(filtered_ledger)} 种物料")
 
 
 def main():
@@ -560,21 +815,50 @@ def main():
         pending = calculate_pending_records(filtered_df)
         suggestions = calculate_replenishment_suggestions(filtered_df)
 
-        render_summary_metrics(stats)
+        if st.session_state.inventory_params is None or st.session_state.inventory_params.empty:
+            st.session_state.inventory_params = init_inventory_params(df)
 
-        tab1, tab2, tab3, tab4 = st.tabs(["发放量趋势", "回收差异排行", "小组负载", "待跟进记录"])
-        with tab1:
-            render_trend_chart(trend)
-        with tab2:
-            render_ranking_chart(ranking)
-        with tab3:
-            render_workload_chart(workload)
-        with tab4:
-            render_pending_records(pending)
+        inventory_ledger = calculate_inventory_ledger(df, st.session_state.inventory_params)
+        inv_summary = get_inventory_summary(inventory_ledger)
+        low_stock_alerts = get_low_stock_alerts(inventory_ledger)
+        abnormal_inventory = get_abnormal_inventory(inventory_ledger)
 
-        render_suggestions(suggestions)
-        render_data_preview(filtered_df)
-        render_download_section(df, filtered_df, filters, stats, trend, ranking, workload, pending, suggestions)
+        tab_main1, tab_main2 = st.tabs(["📊 物料流转分析", "📦 物料库存台账与预警"])
+
+        with tab_main1:
+            render_summary_metrics(stats)
+
+            tab1, tab2, tab3, tab4 = st.tabs(["发放量趋势", "回收差异排行", "小组负载", "待跟进记录"])
+            with tab1:
+                render_trend_chart(trend)
+            with tab2:
+                render_ranking_chart(ranking)
+            with tab3:
+                render_workload_chart(workload)
+            with tab4:
+                render_pending_records(pending)
+
+            render_suggestions(suggestions)
+            render_data_preview(filtered_df)
+
+        with tab_main2:
+            render_inventory_params_config(df)
+            st.markdown("---")
+            render_inventory_summary(inv_summary)
+            st.markdown("---")
+
+            tab_inv1, tab_inv2, tab_inv3 = st.tabs(["🚨 低库存提醒", "⚠️ 异常库存提示", "📒 库存台账明细"])
+            with tab_inv1:
+                render_low_stock_alerts(low_stock_alerts)
+            with tab_inv2:
+                render_abnormal_inventory(abnormal_inventory)
+            with tab_inv3:
+                render_inventory_ledger(inventory_ledger)
+
+        render_download_section(
+            df, filtered_df, filters, stats, trend, ranking, workload, pending, suggestions,
+            inventory_ledger, low_stock_alerts, abnormal_inventory
+        )
 
 
 if __name__ == "__main__":

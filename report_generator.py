@@ -14,6 +14,9 @@ def generate_summary_report(
     pending_df: pd.DataFrame,
     suggestions_df: pd.DataFrame,
     filters: Dict[str, Any],
+    inventory_ledger: pd.DataFrame = None,
+    low_stock_alerts: pd.DataFrame = None,
+    abnormal_inventory: pd.DataFrame = None,
 ) -> bytes:
     output = io.BytesIO()
 
@@ -25,6 +28,8 @@ def generate_summary_report(
         _write_workload_sheet(writer, workload_df)
         _write_pending_sheet(writer, pending_df)
         _write_suggestions_sheet(writer, suggestions_df)
+        _write_inventory_ledger_sheet(writer, inventory_ledger)
+        _write_inventory_alerts_sheet(writer, low_stock_alerts, abnormal_inventory)
         _write_filtered_data_sheet(writer, filtered_df)
 
     output.seek(0)
@@ -219,6 +224,125 @@ def _write_suggestions_sheet(writer, suggestions_df):
     suggestions_df.to_excel(writer, sheet_name="补充建议", index=False)
 
     worksheet = writer.sheets["补充建议"]
+    for column in worksheet.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 20)
+        worksheet.column_dimensions[column_letter].width = adjusted_width
+
+
+def _write_inventory_ledger_sheet(writer, inventory_ledger):
+    if inventory_ledger is None or inventory_ledger.empty:
+        df = pd.DataFrame([["暂无库存台账数据"]])
+        df.to_excel(writer, sheet_name="库存台账", index=False, header=False)
+        return
+
+    ledger_df = inventory_ledger.copy()
+
+    if "丢失率" in ledger_df.columns:
+        ledger_df["丢失率"] = ledger_df["丢失率"].apply(lambda x: f"{x*100:.1f}%")
+    if "最近活动日期" in ledger_df.columns:
+        ledger_df["最近活动日期"] = pd.to_datetime(ledger_df["最近活动日期"]).dt.strftime("%Y-%m-%d")
+
+    column_mapping = {
+        "item_name": "物料名称",
+        "initial_stock": "期初库存",
+        "safety_stock": "安全库存",
+        "总发放量": "累计发放",
+        "总回收量": "累计回收",
+        "总丢失量": "累计丢失",
+        "净消耗量": "净消耗",
+        "丢失率": "丢失率",
+        "当前可用库存": "当前库存",
+        "库存差额": "库存差额",
+        "库存状态": "库存状态",
+        "预警级别": "预警级别",
+        "建议补充数量": "建议补充数量",
+        "异常标记": "异常标记",
+        "发放次数": "发放次数",
+        "最近活动日期": "最近活动日期",
+    }
+    ledger_df = ledger_df.rename(columns=column_mapping)
+
+    ledger_df.to_excel(writer, sheet_name="库存台账", index=False)
+
+    worksheet = writer.sheets["库存台账"]
+    for column in worksheet.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 20)
+        worksheet.column_dimensions[column_letter].width = adjusted_width
+
+
+def _write_inventory_alerts_sheet(writer, low_stock_alerts, abnormal_inventory):
+    if (low_stock_alerts is None or low_stock_alerts.empty) and (abnormal_inventory is None or abnormal_inventory.empty):
+        df = pd.DataFrame([["暂无库存预警数据"]])
+        df.to_excel(writer, sheet_name="预警清单", index=False, header=False)
+        return
+
+    if low_stock_alerts is not None and not low_stock_alerts.empty:
+        low_df = low_stock_alerts.copy()
+        if "丢失率" in low_df.columns:
+            low_df["丢失率"] = low_df["丢失率"].apply(lambda x: f"{x*100:.1f}%")
+        if "最近活动日期" in low_df.columns:
+            low_df["最近活动日期"] = pd.to_datetime(low_df["最近活动日期"]).dt.strftime("%Y-%m-%d")
+        low_df["预警类型"] = "低库存预警"
+    else:
+        low_df = pd.DataFrame()
+
+    if abnormal_inventory is not None and not abnormal_inventory.empty:
+        abn_df = abnormal_inventory.copy()
+        if "丢失率" in abn_df.columns:
+            abn_df["丢失率"] = abn_df["丢失率"].apply(lambda x: f"{x*100:.1f}%")
+        if "最近活动日期" in abn_df.columns:
+            abn_df["最近活动日期"] = pd.to_datetime(abn_df["最近活动日期"]).dt.strftime("%Y-%m-%d")
+        abn_df["预警类型"] = "异常库存预警"
+    else:
+        abn_df = pd.DataFrame()
+
+    combined = pd.concat([low_df, abn_df], ignore_index=True)
+
+    if combined.empty:
+        df = pd.DataFrame([["暂无库存预警数据"]])
+        df.to_excel(writer, sheet_name="预警清单", index=False, header=False)
+        return
+
+    column_mapping = {
+        "预警类型": "预警类型",
+        "item_name": "物料名称",
+        "initial_stock": "期初库存",
+        "safety_stock": "安全库存",
+        "当前可用库存": "当前库存",
+        "库存状态": "库存状态",
+        "预警级别": "预警级别",
+        "异常标记": "异常说明",
+        "总发放量": "累计发放",
+        "总回收量": "累计回收",
+        "总丢失量": "累计丢失",
+        "丢失率": "丢失率",
+        "建议补充数量": "建议补充数量",
+        "最近活动日期": "最近活动日期",
+    }
+
+    available_cols = [col for col in column_mapping.keys() if col in combined.columns]
+    combined = combined[available_cols].copy()
+    combined = combined.rename(columns=column_mapping)
+
+    combined.to_excel(writer, sheet_name="预警清单", index=False)
+
+    worksheet = writer.sheets["预警清单"]
     for column in worksheet.columns:
         max_length = 0
         column_letter = column[0].column_letter
