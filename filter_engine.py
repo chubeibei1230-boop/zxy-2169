@@ -5,7 +5,13 @@ from data_loader import REQUIRED_FIELDS
 
 
 def filter_by_date(df: pd.DataFrame, start_date: Optional[datetime], end_date: Optional[datetime]) -> pd.DataFrame:
-    if df.empty or "record_date" not in df.columns:
+    if df.empty:
+        return df
+
+    if "record_date" not in df.columns:
+        return df
+
+    if df["record_date"].isna().all():
         return df
 
     df = df.copy()

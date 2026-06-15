@@ -89,6 +89,31 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def detect_non_numeric(raw_df: pd.DataFrame, mapping: Dict[str, Optional[str]]) -> pd.DataFrame:
+    numeric_standard = ["issued_qty", "returned_qty", "lost_qty"]
+    numeric_raw = []
+    for std in numeric_standard:
+        raw_col = mapping.get(std)
+        if raw_col and raw_col in raw_df.columns:
+            numeric_raw.append((std, raw_col))
+
+    if not numeric_raw:
+        return pd.DataFrame()
+
+    bad_rows = pd.DataFrame()
+    for std, raw_col in numeric_raw:
+        series = raw_df[raw_col]
+        coerced = pd.to_numeric(series, errors="coerce")
+        mask = series.notna() & coerced.isna()
+        if mask.any():
+            subset = raw_df.loc[mask].copy()
+            subset["异常字段"] = raw_col
+            subset["原始值"] = series[mask].astype(str)
+            bad_rows = pd.concat([bad_rows, subset], ignore_index=True)
+
+    return bad_rows
+
+
 def get_unique_values(df: pd.DataFrame, column: str) -> List[str]:
     if column not in df.columns:
         return []

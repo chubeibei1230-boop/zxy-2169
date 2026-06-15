@@ -1,6 +1,6 @@
 import pandas as pd
 from typing import Dict, List, Any
-from data_loader import REQUIRED_FIELDS
+from data_loader import REQUIRED_FIELDS, detect_non_numeric
 
 
 def check_missing_columns(raw_df: pd.DataFrame, mapping: Dict[str, Any]) -> List[str]:
@@ -9,6 +9,16 @@ def check_missing_columns(raw_df: pd.DataFrame, mapping: Dict[str, Any]) -> List
         if raw_col is None or raw_col not in raw_df.columns:
             missing.append(standard_field)
     return missing
+
+
+def check_duplicate_mapping(mapping: Dict[str, Any]) -> Dict[str, List[str]]:
+    col_to_fields: Dict[str, List[str]] = {}
+    for standard_field, raw_col in mapping.items():
+        if raw_col is not None:
+            col_to_fields.setdefault(raw_col, []).append(standard_field)
+
+    duplicates = {col: fields for col, fields in col_to_fields.items() if len(fields) > 1}
+    return duplicates
 
 
 def check_duplicate_records(df: pd.DataFrame) -> pd.DataFrame:
@@ -83,16 +93,25 @@ def check_empty_key_fields(df: pd.DataFrame) -> pd.DataFrame:
 def validate_all(df: pd.DataFrame, raw_df: pd.DataFrame, mapping: Dict[str, Any]) -> Dict[str, Any]:
     results = {
         "missing_columns": check_missing_columns(raw_df, mapping),
+        "duplicate_mapping": check_duplicate_mapping(mapping),
         "duplicate_records": check_duplicate_records(df),
         "abnormal_quantity": check_abnormal_quantity(df),
         "negative_quantity": check_negative_quantity(df),
         "invalid_dates": check_invalid_dates(df),
         "empty_keys": check_empty_key_fields(df),
+        "non_numeric": detect_non_numeric(raw_df, mapping),
     }
 
     summary = []
     if results["missing_columns"]:
         summary.append(f"缺失字段: {', '.join(results['missing_columns'])}")
+
+    if results["duplicate_mapping"]:
+        dup_msgs = []
+        for col, fields in results["duplicate_mapping"].items():
+            fields_cn = [FIELD_NAMES_CN.get(f, f) for f in fields]
+            dup_msgs.append(f"列「{col}」被映射到: {', '.join(fields_cn)}")
+        summary.append(f"字段映射冲突: {'; '.join(dup_msgs)}")
 
     if not results["duplicate_records"].empty:
         summary.append(f"重复记录: {len(results['duplicate_records'])} 条")
@@ -108,6 +127,9 @@ def validate_all(df: pd.DataFrame, raw_df: pd.DataFrame, mapping: Dict[str, Any]
 
     if not results["empty_keys"].empty:
         summary.append(f"关键字段为空: {len(results['empty_keys'])} 条")
+
+    if not results["non_numeric"].empty:
+        summary.append(f"非数字数量: {len(results['non_numeric'])} 条（已被转为 0）")
 
     results["summary"] = summary
     results["has_errors"] = len(summary) > 0

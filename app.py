@@ -19,6 +19,7 @@ from validator import (
     validate_all,
     check_abnormal_quantity,
     check_duplicate_records,
+    check_duplicate_mapping,
     FIELD_NAMES_CN,
 )
 from filter_engine import (
@@ -153,6 +154,13 @@ def render_column_mapping(raw_df):
     st.session_state.column_mapping = mapping
 
     if st.button("✅ 确认映射并处理数据", type="primary"):
+        dup_mapping = check_duplicate_mapping(mapping)
+        if dup_mapping:
+            for col, fields in dup_mapping.items():
+                fields_cn = [FIELD_NAMES_CN.get(f, f) for f in fields]
+                st.error(f"❌ 列「{col}」被重复映射到: {', '.join(fields_cn)}，请调整映射后重试")
+            st.stop()
+
         mapped_df = apply_column_mapping(raw_df, mapping)
         normalized_df = normalize_dataframe(mapped_df)
         st.session_state.normalized_df = normalized_df
@@ -207,26 +215,42 @@ def render_validation_results():
             with st.expander(f"⚠️ 负数数量记录 ({len(results['negative_quantity'])} 条)"):
                 st.dataframe(results["negative_quantity"], use_container_width=True)
 
+    if not results.get("non_numeric", pd.DataFrame()).empty:
+        with st.expander(f"⚠️ 非数字数量记录 ({len(results['non_numeric'])} 条，已被转为 0)"):
+            st.warning("以下记录的数量字段包含非数字值，已自动转为 0，请核实原始数据")
+            st.dataframe(results["non_numeric"], use_container_width=True)
+
 
 def render_filter_sidebar(df):
     st.sidebar.header("🔍 筛选条件")
 
-    min_date = df["record_date"].min().date() if not df.empty and df["record_date"].notna().any() else date.today()
-    max_date = df["record_date"].max().date() if not df.empty and df["record_date"].notna().any() else date.today()
+    has_valid_dates = not df.empty and "record_date" in df.columns and df["record_date"].notna().any()
 
-    start_date = st.sidebar.date_input(
-        "开始日期",
-        value=min_date,
-        min_value=min_date,
-        max_value=max_date,
-    )
+    if has_valid_dates:
+        min_date = df["record_date"].min().date()
+        max_date = df["record_date"].max().date()
+    else:
+        min_date = date.today()
+        max_date = date.today()
 
-    end_date = st.sidebar.date_input(
-        "结束日期",
-        value=max_date,
-        min_value=min_date,
-        max_value=max_date,
-    )
+    if has_valid_dates:
+        start_date = st.sidebar.date_input(
+            "开始日期",
+            value=min_date,
+            min_value=min_date,
+            max_value=max_date,
+        )
+
+        end_date = st.sidebar.date_input(
+            "结束日期",
+            value=max_date,
+            min_value=min_date,
+            max_value=max_date,
+        )
+    else:
+        st.sidebar.warning("⚠️ 未检测到有效日期列，日期筛选已禁用")
+        start_date = None
+        end_date = None
 
     item_names = get_unique_values(df, "item_name")
     selected_items = st.sidebar.multiselect(
@@ -534,7 +558,7 @@ def main():
         ranking = calculate_return_diff_ranking(filtered_df)
         workload = calculate_group_workload(filtered_df)
         pending = calculate_pending_records(filtered_df)
-        suggestions = calculate_replenishment_suggestions(df)
+        suggestions = calculate_replenishment_suggestions(filtered_df)
 
         render_summary_metrics(stats)
 
